@@ -1,0 +1,2 @@
+# Pin-free lock for local venv; use pyproject.toml as source of truth.
+matplotlib>=3.7
