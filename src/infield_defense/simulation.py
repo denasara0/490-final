@@ -1,14 +1,3 @@
-"""
-Simulation state and time stepping.
-
-This file ties together:
-    - Robot positions and velocities
-    - Ball trajectory parameters
-    - One small Euler step: new_position = old_position + velocity * dt
-
-It does not draw graphics; see ``cli.py`` for that.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,11 +10,8 @@ from infield_defense.config import DEFAULT_DYNAMICS, DEFAULT_FIELD, DynamicsConf
 from infield_defense.coordination import select_primary_fielder
 from infield_defense.formation import formation_control_input, neighbor_indices_ring
 
-
 @dataclass
 class BallState:
-    """Everything needed to predict the ball path until you change these values."""
-
     p0: npt.NDArray[np.float64]  # Starting position when this segment began
     v0: npt.NDArray[np.float64]  # Starting velocity
     a: npt.NDArray[np.float64]  # Constant acceleration (slowdown along x in our demo)
@@ -35,12 +21,12 @@ class BallState:
 
 @dataclass
 class SimState:
-    """Full snapshot of the multi-robot + ball world."""
-
     positions: npt.NDArray[np.float64]  # Shape (N, 2)
     velocities: npt.NDArray[np.float64]  # Shape (N, 2)
+    home_positions: npt.NDArray[np.float64]  # Shape (N, 2), default defensive spots
     ball: BallState
     primary_idx: int | None = None  # Which robot is chosen to chase the ball; None before assignment
+    role_names: list[str] = field(default_factory=list)
     neighbors: list[list[int]] = field(default_factory=list)  # From formation.neighbor_indices_ring
 
 
@@ -56,42 +42,44 @@ def clip_speed(v: npt.NDArray[np.float64], vmax: float) -> npt.NDArray[np.float6
     return v * (vmax / speed)
 
 
-def initial_positions_even_arc(
-    n: int,
-    center: tuple[float, float] = (0.0, 10.0),
-    radius: float = 18.0,
-    span_deg: float = 100.0,
+def initial_infielder_layout(
+    field: FieldConfig = DEFAULT_FIELD,
+) -> tuple[npt.NDArray[np.float64], list[str]]:
+    role_positions = field.infielder_positions()
+    role_names = list(role_positions.keys())
+    positions = np.array(list(role_positions.values()), dtype=np.float64)
+    return positions, role_names
+
+
+def clip_positions_to_infield(
+    positions: npt.NDArray[np.float64],
+    field: FieldConfig = DEFAULT_FIELD,
 ) -> npt.NDArray[np.float64]:
-    """
-    Place n robots on a circular arc — handy for a readable default picture.
-
-    You can change center, radius, or span_deg to get different starting shapes.
-    """
-    cx, cy = center
-    angles = np.linspace(
-        np.deg2rad(90 + span_deg / 2),
-        np.deg2rad(90 - span_deg / 2),
-        n,
-    )
-    xs = cx + radius * np.cos(angles)
-    ys = cy + radius * np.sin(angles)
-    return np.stack([xs, ys], axis=1).astype(np.float64)
+    positions[:, 0] = np.clip(positions[:, 0], -field.infield_x_limit, field.infield_x_limit)
+    positions[:, 1] = np.clip(positions[:, 1], field.infield_y_min, field.infield_y_max)
+    return positions
 
 
-def make_state(n_robots: int = 5) -> SimState:
-    """Create a fresh simulation with robots on an arc and no active ball."""
-    pos = initial_positions_even_arc(n_robots)
+def make_state(
+    n_robots: int | None = None,
+    field: FieldConfig = DEFAULT_FIELD,
+) -> SimState:
+    pos, role_names = initial_infielder_layout(field)
+    if n_robots is not None and n_robots != pos.shape[0]:
+        raise ValueError(f"This demo renders exactly {pos.shape[0]} robots (received {n_robots}).")
     vel = np.zeros_like(pos)
     return SimState(
         positions=pos,
         velocities=vel,
+        home_positions=pos.copy(),
         ball=BallState(
             p0=np.zeros(2, dtype=np.float64),
             v0=np.zeros(2, dtype=np.float64),
             a=np.zeros(2, dtype=np.float64),
             active=False,
         ),
-        neighbors=neighbor_indices_ring(n_robots),
+        role_names=role_names,
+        neighbors=neighbor_indices_ring(pos.shape[0]),
     )
 
 
@@ -100,21 +88,14 @@ def step_formation(
     field: FieldConfig = DEFAULT_FIELD,
     dyn: DynamicsConfig = DEFAULT_DYNAMICS,
 ) -> None:
-    """
-    Advance the clock by one step while everyone is in "defensive formation" mode.
-
-    Mutates ``state`` in place: updates velocities then positions.
-    """
     raw_command = formation_control_input(state.positions, state.neighbors, dyn.formation_gain)
     state.velocities = clip_speed(raw_command, dyn.vmax)
     state.positions += state.velocities * dyn.dt
-    # Keep robots inside the field rectangle (simple bounce substitute).
     state.positions[:, 0] = np.clip(state.positions[:, 0], field.x_min, field.x_max)
     state.positions[:, 1] = np.clip(state.positions[:, 1], field.y_min, field.y_max)
 
 
 def current_ball_pos(state: SimState, t: float) -> npt.NDArray[np.float64]:
-    """Ball [x, y] at simulation time t (uses ball.py if the ball is active)."""
     if not state.ball.active:
         return state.ball.p0.copy()
     time_since_start = t - state.ball.t0
@@ -129,20 +110,7 @@ def launch_ground_ball(
     decel_magnitude: float,
     vmax: float | None = None,
 ) -> None:
-    """
-    Start a new ground ball from rest conditions (p0, v0) and pick the primary fielder.
-
-    Acceleration is chosen so the ball slows down horizontally (very rough "friction").
-
-    Args:
-        state: Full simulation state (updated in place).
-        t: Current simulation time (stored on the ball so we know how long it has rolled).
-        p0, v0: Initial ball position and velocity.
-        decel_magnitude: How strong the slowdown is (bigger = stops sooner).
-        vmax: Optional override for interception-time math; default comes from config.
-    """
     v0 = np.asarray(v0, dtype=np.float64)
-    # Only slow the ball along the horizontal part of its motion (simple demo model).
     horizontal_part = np.array([v0[0], 0.0], dtype=np.float64)
     horizontal_len = float(np.linalg.norm(horizontal_part))
     if horizontal_len > 1e-6:
