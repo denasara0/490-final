@@ -7,7 +7,7 @@ import numpy.typing as npt
 
 from infield_defense.ball import ball_position
 from infield_defense.config import DEFAULT_DYNAMICS, DEFAULT_FIELD, DynamicsConfig, FieldConfig
-from infield_defense.coordination import delivery_costs, select_primary_fielder
+from infield_defense.coordination import delivery_costs, select_primary_fielder, select_primary_fielder_predicted
 from infield_defense.formation import formation_control_input, neighbor_indices_ring
 
 @dataclass
@@ -55,6 +55,7 @@ class EpisodeConfig:
     base_radius: float = 0.75
     handoff_radius: float = 0.75
     tau_handoff: float = 0.0
+    base_pos: tuple[float, float] = DEFAULT_FIELD.first_base
 
     # Safety
     max_time: float = 20.0
@@ -94,7 +95,7 @@ def run_episode(
     state.neighbors = neighbor_indices_ring(cfg.n_robots)
     state.velocities = np.zeros_like(state.positions)
 
-    base_pos = np.array(field.first_base, dtype=np.float64)
+    base_pos = np.array(cfg.base_pos, dtype=np.float64)
     t = 0.0
     launched = False
     intercept_time: float | None = None
@@ -243,12 +244,29 @@ def clip_speed(v: npt.NDArray[np.float64], vmax: float) -> npt.NDArray[np.float6
 
 
 def initial_infielder_layout(
+    n_robots: int | None = None,
     field: FieldConfig = DEFAULT_FIELD,
 ) -> tuple[npt.NDArray[np.float64], list[str]]:
     role_positions = field.infielder_positions()
-    role_names = list(role_positions.keys())
-    positions = np.array(list(role_positions.values()), dtype=np.float64)
-    return positions, role_names
+    default_role_names = list(role_positions.keys())
+    default_positions = np.array(list(role_positions.values()), dtype=np.float64)
+
+    # If caller didn't request a specific N, keep the field's default infielder set.
+    if n_robots is None:
+        return default_positions, default_role_names
+
+    # Preserve the report/demo semantics when N matches the named infielders.
+    if n_robots == default_positions.shape[0]:
+        return default_positions, default_role_names
+
+    # Otherwise, generate a reasonable infield starting layout for arbitrary N.
+    # Place robots evenly on a circle inside infield bounds.
+    radius = 0.75 * min(field.infield_x_limit, field.infield_y_max)
+    angles = np.linspace(0.0, 2.0 * np.pi, num=n_robots, endpoint=False, dtype=np.float64)
+    positions = np.column_stack((radius * np.cos(angles), radius * np.sin(angles)))
+    positions = clip_positions_to_infield(positions, field)
+    role_names = [f"Robot {i}" for i in range(n_robots)]
+    return positions.astype(np.float64, copy=False), role_names
 
 
 def clip_positions_to_infield(
@@ -264,9 +282,7 @@ def make_state(
     n_robots: int | None = None,
     field: FieldConfig = DEFAULT_FIELD,
 ) -> SimState:
-    pos, role_names = initial_infielder_layout(field)
-    if n_robots is not None and n_robots != pos.shape[0]:
-        raise ValueError(f"This demo renders exactly {pos.shape[0]} robots (received {n_robots}).")
+    pos, role_names = initial_infielder_layout(n_robots=n_robots, field=field)
     vel = np.zeros_like(pos)
     return SimState(
         positions=pos,
@@ -327,5 +343,15 @@ def launch_ground_ball(
     )
 
     speed_limit = DEFAULT_DYNAMICS.vmax if vmax is None else vmax
-    ball_now = current_ball_pos(state, t)
-    state.primary_idx = select_primary_fielder(state.positions, ball_now, speed_limit)
+    # Predicted interception bidding (moving ball) differentiates "ours" from nearest baselines.
+    state.primary_idx = select_primary_fielder_predicted(
+        state.positions,
+        t_now=t,
+        ball_t0=state.ball.t0,
+        ball_p0=state.ball.p0,
+        ball_v0=state.ball.v0,
+        ball_a=state.ball.a,
+        vmax=speed_limit,
+        horizon_s=6.0,
+        sample_dt_s=DEFAULT_DYNAMICS.dt,
+    )
