@@ -22,6 +22,20 @@ python -m infield_defense.cli
 
 This opens a matplotlib animation: robots hold a ring formation, then a sample ground ball is launched and a primary fielder is chosen by lowest estimated interception time.
 
+## Report
+
+- LaTeX report source lives at `report/infield_defense_paper.tex`.
+
+## Run repeated-trial evaluation (quantitative metrics)
+
+```bash
+infield-eval
+# or
+python -m infield_defense.evaluate
+```
+
+This runs repeated trials across a small sweep of \(N\) and \(v_{\max}\), compares baselines, and writes `results/eval.csv` for tables/plots.
+
 ## Layout
 
 - `src/infield_defense/config.py` — field bounds, `v_max`, formation gain, timestep
@@ -30,5 +44,6 @@ This opens a matplotlib animation: robots hold a ring formation, then a sample g
 - `src/infield_defense/coordination.py` — interception bids and delivery cost (Algorithms 1–2)
 - `src/infield_defense/simulation.py` — state and timestep hooks
 - `src/infield_defense/cli.py` — demo viewer
+- `src/infield_defense/evaluate.py` — headless repeated-trial runner (CSV + aggregate table)
 
 Dependencies are **NumPy** and **Matplotlib** only (no Webots); you can add a physics engine later if needed.

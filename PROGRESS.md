@@ -39,7 +39,7 @@
 - **Intercept behavior:** Demo moves the primary toward the **instantaneous** ball location; the proposal’s use of **predicted** positions along the trajectory can be strengthened (e.g., minimize time-to-intercept along the parabola/roll).  
 - **Distributed aspect:** Each robot *could* compute its own bid; the codebase computes times centrally for simplicity. A message-passing narrative or explicit broadcast simulation may be added for the final report if needed.  
 - **End-to-end play:** No scripted sequence yet for *secure ball → choose direct/relay → execute pass/run → reset formation*.  
-- **Evaluation:** No automated logging, plots, or sweeps over speeds / formations.
+- **Evaluation:** Headless sweep runner added (`infield-eval`) writing `results/eval.csv`; plotting and additional metrics still TBD.
 
 ---
 

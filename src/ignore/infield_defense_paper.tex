@@ -1,0 +1,302 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{cite}
+
+\title{Multi-Robot Infield Defense System Using Distributed Intercept and Relay Coordination}
+
+\author{
+\IEEEauthorblockN{Aman Khatri, Dena Shink, Jason Ballinger}
+\IEEEauthorblockA{Indiana University Bloomington}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Multi-robot coordination systems operate in dynamic environments where robots must allocate tasks efficiently while maintaining system stability. This project proposes a distributed coordination framework inspired by baseball infield defense. Robots maintain formation, detect and intercept a moving ball, and determine optimal delivery strategies using decentralized decision-making. The system integrates trajectory prediction, interception optimization, and relay-based delivery to minimize total task completion time. The framework is implemented in a Python-based simulation environment to evaluate performance under varying conditions.
+\end{abstract}
+
+\section{Introduction}
+
+Multi-robot systems (MRS) enable coordination, where robots must efficiently allocate tasks to solve complex tasks in dynamic environments such as warehouse automation, autonomous transportation, and search-and-rescue operations. A key challenge in these systems is dynamic task allocation, where robots must determine which agent should execute a task while maintaining coordination with the rest of the system.
+
+Our project explores multi-robot coordination inspired by baseball infield defense. In this setting, multiple agents must quickly decide who should field a ground ball and how to move it toward a target base. This provides a structured scenario for studying decentralized coordination and role assignment.
+
+We propose a distributed intercept–relay coordination framework in which robots can:
+\begin{itemize}
+    \item Maintain a defensive formation
+    \item Detect and predict ball motion
+    \item Independently compute interception costs
+    \item Dynamically assign interception task without centralized control
+\end{itemize}
+
+\textbf{Updated Scope:} We are targeting a 2-Dimensional simulation of $N$ infield-style robots with kinematic motion, a ground ball modeled with constant planar acceleration, decentralized formation control on a ring communication graph, and time-to-intercept bidding for primary fielder selection. Our implementation uses Python with NumPy for dynamics and Matplotlib for visualization. A future, more complex implementation would ideally use a full physics engine rendering a 3-Dimensional simulation. However, we deemed this to be too complex given our time constraint on the project.
+
+\textbf{Progress So Far:}
+\begin{itemize}
+    \item Fully developed the initial 2D simulation environment
+    \item Fully developed the ball mechanisms, including motion, hitting, and foul ball randomness and logic.
+    \item Partially developed an initial algorithm for the defensive robots.
+\end{itemize}
+
+\textbf{Positioning (and what is novel here).} Task allocation in multi-robot systems has been widely studied, including market/bidding-style assignments and distributed coordination under limited communication. Separately, formation/consensus control is a standard tool for maintaining team structure using local neighbor interactions. Our contribution is not a new core algorithmic primitive; rather, we combine (i) local formation maintenance, (ii) a simple distributed ``bidding'' proxy for primary fielder selection, and (iii) a relay-vs-direct delivery decision into one end-to-end pipeline tailored to a baseball-like infield scenario, with an implementation that makes the architecture and evaluation protocol explicit. This integration and evaluation in an infield-defense-inspired scenario is the primary novelty claim, and we compare against simple baselines in Section~VII.
+
+\subsection{Related Work (brief)}
+Multi-robot task allocation has been formalized and categorized in prior work (e.g., auction/market-based methods)~\cite{gerkey2004}. Consensus and graph-theoretic methods are commonly used to maintain coordination and distributed agreement in multi-agent teams~\cite{mesbahi2010,olfati2006}. Our approach uses these ideas in a deliberately simple form to prioritize a complete, testable end-to-end system in simulation: local formation control plus a distributed selection rule for interception and a one-hop relay decision for delivery.
+
+\section{System Model}
+
+Consider a team of $N$ robots operating in a two-dimensional environment. The position of robot $i$ is defined as:
+
+\begin{equation}
+p_i = [x_i, y_i]^T \in \mathbb{R}^2 .
+\end{equation}
+
+The position of the ball at time $t$ is:
+
+\begin{equation}
+p_b(t) = [x_b(t), y_b(t)]^T \in \mathbb{R}^2 .
+\end{equation}
+
+Robot motion follows a kinematic model:
+
+\begin{equation}
+\dot{p}_i = v_i ,
+\end{equation}
+with velocity constrained by $\|v_i\| \le v_{\max}$ when a speed limit is enforced.
+
+The objective is to minimize total task completion time:
+
+\begin{equation}
+T_{\mathrm{total}} = T_{\mathrm{intercept}} + T_{\mathrm{delivery}} .
+\end{equation}
+
+\section{Implemented Approach}
+
+\subsection{Ball Trajectory Model}
+
+The ground ball trajectory is approximated as:
+
+\begin{equation}
+p_b(t) = p_0 + v_0 t + \frac{1}{2} a t^2 , \qquad t \ge 0 ,
+\end{equation}
+where \(p_0 \in \mathbb{R}^2\) is the ball position at the start of the segment, \(v_0 \in \mathbb{R}^2\) is the initial planar velocity, and \(a \in \mathbb{R}^2\) is the (constant) planar acceleration used to approximate rolling friction and small bounces. Here \(t\) is elapsed time since the segment began. This allows robots to query predicted ball positions \(p_b(t)\) from the model.
+
+\subsection{Formation Control}
+
+Let $\mathcal{N}_i$ denote the set of neighbor indices of robot $i$ on the communication graph. We implement a decentralized control law:
+\begin{equation}
+u_i = -k \sum_{j \in \mathcal{N}_i} (p_i - p_j) ,
+\label{eq:formation-law}
+\end{equation}
+with gain $k > 0$. This is a Laplacian-type (consensus) coupling: it coordinates relative positions using only local information. It does not, by itself, enforce fixed pairwise distances; spacing behavior depends on the graph, gains, and initial conditions.
+
+\subsection{Interception Model}
+
+At a common evaluation time $t$, each robot $i$ uses a straight-line travel-time proxy
+\begin{equation}
+\widehat{T}_i(t) = \frac{\|p_i - p_b(t)\|}{v_{\max}} .
+\label{eq:Ti-hat}
+\end{equation}
+\noindent\textbf{Modeling assumption (and justification).} We treat robots as holonomic point agents with bounded speed \(v_{\max}\) and neglect acceleration limits and turning dynamics. Under this model, the minimum time to reach a \emph{fixed} point \(q\) is \(\|p_i-q\|/v_{\max}\). For a moving ball, using \(\|p_i-p_b(t)\|/v_{\max}\) at a shared evaluation time \(t\) becomes a lightweight heuristic ``bid'' that is computable locally and is consistent with the simulator's discrete-time update loop. In the final report we will compare this proxy against an alternative that searches over a short horizon for the best intercept time \(t'\) (minimizing \(\|p_i-p_b(t')\|/v_{\max}+t'\)) to quantify the approximation impact.
+\noindent The selected fielder is
+\begin{equation}
+i^\ast = \arg\min_i \widehat{T}_i(t) .
+\label{eq:istar}
+\end{equation}
+
+\subsection{Distributed Coordination}
+
+The system implements:
+\begin{itemize}
+    \item Interception bidding and selection
+    \item Role assignment (primary and supporting robots)
+    \item State transitions between formation, interception, and delivery
+\end{itemize}
+
+\subsection{Delivery Optimization}
+
+After interception, the system evaluates direct travel versus a one-hop relay using straight-line legs at speed $v_{\max}$. Let $p_{\mathrm{base}}$ denote the target base position. Let $\tau_{\mathrm{hp}} \ge 0$ denote any fixed handling/pass delay at the relay (instantaneous handoff corresponds to $\tau_{\mathrm{hp}} = 0$):
+\begin{equation}
+C_{\mathrm{direct}} = \frac{\|p_{i^\ast} - p_{\mathrm{base}}\|}{v_{\max}} ,
+\end{equation}
+\begin{equation}
+C_{\mathrm{relay}}(j) = \frac{\|p_{i^\ast} - p_j\|}{v_{\max}} + \frac{\|p_j - p_{\mathrm{base}}\|}{v_{\max}} + \tau_{\mathrm{hp}} .
+\end{equation}
+\noindent\textbf{Modeling assumption (and justification).} The delivery model assumes the same holonomic, speed-bounded travel-time proxy used for interception. The relay cost adds a constant handoff delay \(\tau_{\mathrm{hp}}\) to represent capture/transfer latency; in simulation this can be set to \(0\) (idealized) or tuned to study when relays stop being beneficial. This yields a transparent criterion for whether ``throwing''/handoff is worth it, and it is directly measurable in repeated trials.
+\noindent The system selects $\min\bigl\{ C_{\mathrm{direct}},\; \min_{j \ne i^\ast} C_{\mathrm{relay}}(j) \bigr\}$ (and the corresponding action).
+
+\subsection{Technical Implementation}
+
+\begin{itemize}
+    \item Language: Python
+    \item Simulation: Custom 2D environment
+    \item Modules:
+    \begin{itemize}
+        \item Trajectory prediction
+        \item Interception solver
+        \item Communication layer (broadcast)
+        \item Role assignment logic
+    \end{itemize}
+\end{itemize}
+
+\section{System Architecture}
+
+\noindent\textbf{Distributed algorithm vs. centralized simulator harness.} Our \emph{algorithmic} claim is distributed: each robot can compute its own bid \(\widehat{T}_i(t)\) and (given a communication primitive to share bids) agree on \(i^\ast\), and each robot can evaluate relay candidates using locally available states. Our current \emph{implementation} is a centralized Python simulator that executes a synchronous ``round'' each timestep (to update dynamics, sample noise, and render plots). This centralized harness collects the robots' per-agent outputs for convenience, but the computations labeled \texttt{formation} and \texttt{coordination} are written in a way that is per-robot computable given neighbor/broadcast messages. In the final version, we will make this separation explicit by (i) treating message passing as an interface and (ii) reporting which variables are local (\(p_i\), neighbor states) versus global (ball state, for this simulator).
+
+\subsection{Computation and Information Partition}
+To remove ambiguity about ``local'' versus ``global'' logic, we define the following partition:
+\begin{itemize}
+    \item \textbf{Local robot state (robot \(i\)):} \(p_i\) (and \(v_i\) if modeled), plus its current mode (formation / pursuit / delivery).
+    \item \textbf{Neighbor information:} \(p_j\) for \(j \in \mathcal{N}_i\) (used in \eqref{eq:formation-law}).
+    \item \textbf{Broadcast information (shared):} a detection timestamp and a shared estimate of ball parameters \((p_0,v_0,a,t_0)\) for \(p_b(t)\). In real hardware, this could come from a sensor robot or a shared perception service; in our simulator it is provided directly by \texttt{ball}.
+    \item \textbf{Distributed coordination messages:} scalar bids \(\widehat{T}_i(t)\) and optional relay costs \(C_{\mathrm{relay}}(j)\). An ``all-to-all'' broadcast is assumed for the current simulation; restricting this to a neighborhood graph is a possible extension.
+\end{itemize}
+\noindent Under this partition, the only centralized component is the \emph{simulation loop} that advances time and applies dynamics; the decision rules themselves are defined per-agent and depend only on local/communicated quantities.
+
+Figure~\ref{fig:arch} summarizes the software structure. Robots are treated as point masses in the plane. Each simulation step updates either defensive formation or pursuit behavior depending on game phase.
+
+\begin{figure}[htbp]
+\centering
+\fbox{\parbox{0.88\columnwidth}{\centering
+\vspace{0.15in}
+\textbf{infield\_defense} package (Python)\\[0.5em]
+\texttt{config} $\rightarrow$ parameters (field, $v_{\max}$, $k$, $\Delta t$)\\[0.25em]
+\texttt{ball} $\rightarrow$ $p_b(t)$ prediction\\[0.25em]
+\texttt{formation} $\rightarrow$ neighbor graph + $u_i$\\[0.25em]
+\texttt{coordination} $\rightarrow$ $\widehat{T}_i$, $i^\ast$, $C_{\mathrm{direct}}$, $C_{\mathrm{relay}}$\\[0.25em]
+\texttt{simulation} $\rightarrow$ state, Euler integration, ball launch\\[0.25em]
+\texttt{cli} $\rightarrow$ Matplotlib animation
+\vspace{0.15in}
+}}
+\caption{Modular architecture of the simulation. Replace the framed box with a TikZ or PowerPoint figure if required.}
+\label{fig:arch}
+\end{figure}
+
+\noindent\textbf{Data flow.} \texttt{simulation} holds robot positions and velocities and the active \texttt{BallState} $(p_0, v_0, a, t_0)$. On ball detection, \texttt{coordination.select\_primary\_fielder} sets $i^*$. During pursuit, the demo steers $i^*$ toward the current $p_b(t)$; supporting robots continue formation on the induced subgraph. Delivery optimization is implemented but not yet wired to post-capture motion.
+
+\section{Experimental Design}
+
+To evaluate the performance of the proposed system, we design a series of simulation experiments.
+
+\subsection{Simulation Setup}
+
+The environment consists of $N$ robots initialized in a defensive formation. The ball is launched with randomized initial velocity and direction. Each simulation will run until interception and delivery are completed.
+
+\subsection{Variables}
+
+We vary the following parameters:
+\begin{itemize}
+    \item Number of robots ($N = 4, 6, 8$)
+    \item Maximum robot velocity ($v_{\max}$)
+    \item Ball initial speed and direction
+    \item Communication delays
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+We measure:
+\begin{itemize}
+    \item Interception time ($T_{\text{intercept}}$)
+    \item Delivery time ($T_{\text{delivery}}$)
+    \item Total task completion time ($T_{\text{total}}$)
+    \item Success rate (successful fielding and delivery)
+\end{itemize}
+
+\subsection{Evaluation Protocol (repeated trials and baselines)}
+For each parameter setting, we will run \(K\) randomized trials (we target \(K=50\) or \(100\)) with controlled random seeds and report mean \(\pm\) standard deviation as well as median and 90th percentile for timing metrics. We will include at least two baselines:
+\begin{itemize}
+    \item \textbf{Nearest-direct baseline:} choose \(i^\ast\) by Euclidean distance to the ball at detection; deliver directly (no relay).
+    \item \textbf{Ours w/o relay:} our bidding-based \(i^\ast\), but force direct delivery. This isolates the relay decision benefit.
+\end{itemize}
+
+\subsection{Expected Outcomes}
+
+We think that increasing the number of robots improves interception success, but could introduce coordination overhead. In addition, relay-based delivery is expected to outperform direct delivery in long-distance scenarios.
+
+\section{Preliminary Results}
+
+We have verified the implementation qualitatively via the Matplotlib demo: robots maintain an arc-shaped defensive layout under formation control; after a scripted ground ball launch, the primary fielder index matches $\arg\min_i \widehat{T}_i(t)$ under the proxy~\eqref{eq:Ti-hat}. Quantitative evaluation is in progress; the next deliverable is a table of repeated-trial results with baseline comparisons.
+
+\subsection{Quantitative Results Template (to be filled)}
+Table~\ref{tab:results-template} is the intended format for reporting repeated trials. We will also include plots of distributions (histograms/ECDFs) for \(T_{\mathrm{intercept}}\) and \(T_{\mathrm{total}}\) and a success-rate curve versus \(v_{\max}\).
+
+\begin{table}[htbp]
+\centering
+\caption{Preliminary quantitative results template (\(K\) trials per setting).}
+\label{tab:results-template}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & \(N\) & \(v_{\max}\) & \(T_{\mathrm{intercept}}\) (mean\(\pm\)std) & Success (\%) \\
+\midrule
+Nearest-direct baseline &  &  &  &  \\
+Ours (no relay) &  &  &  &  \\
+Ours (relay enabled) &  &  &  &  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Current Evidence}
+As an existence proof of the full simulation loop, Figure~\ref{fig:placeholder} shows the running system. This figure will be complemented by quantitative tables/plots as described above.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{Simulation Screenshot.jpg}
+    \caption{Simulation screenshot (qualitative verification of the pipeline).}
+    \label{fig:placeholder}
+\end{figure}
+
+\section{Plan and Milestones}
+
+\subsection{Remaining Tasks}
+
+\begin{itemize}
+    \item Improve communication/coordination between robots
+    \item Finish algorithm for ball interception
+    \item Run repeated-trial evaluation and generate quantitative tables/plots (timings and success rates) with baseline comparisons
+    \item Integrate delivery (direct vs relay) into post-capture motion and report when relay helps as a function of distance and \(\tau_{\mathrm{hp}}\)
+\end{itemize}
+
+\subsection{Evaluation Plan}
+
+\textbf{Scenarios:}
+\begin{itemize}
+    \item Varying ball speeds
+    \item Different robot counts
+    \item Communication delays
+    \item Formation disturbances
+\end{itemize}
+
+\textbf{Metrics:}
+\begin{itemize}
+    \item Efficiency metrics (completion time, success rate)
+    \item Formation stability
+    \item Communication quality
+\end{itemize}
+
+\subsection{Success Criteria}
+We will consider the core system complete if:
+\begin{itemize}
+    \item For at least one representative setting (e.g., \(N \in \{4,6\}\) and two values of \(v_{\max}\)), we can report \(K \ge 50\) trial results with mean\(\pm\)std for \(T_{\mathrm{intercept}}\), \(T_{\mathrm{delivery}}\), \(T_{\mathrm{total}}\), plus success rate.
+    \item Our method matches or improves \(T_{\mathrm{total}}\) compared to the nearest-direct baseline in at least one regime (e.g., longer delivery distance or higher \(N\)), and we can explain when it fails.
+    \item Plots/tables and figure captions are sufficient for an academic reader to verify claims without relying on screenshots alone.
+\end{itemize}
+
+\section{Conclusion}
+
+Our project presents a decentralized framework for multi-robot coordination inspired by baseball infield defense. By combining formation control, interception optimization, and relay-based decision-making, the system demonstrates how distributed algorithms can effectively handle dynamic task allocation.
+
+\begin{thebibliography}{00}
+
+\bibitem{mesbahi2010} M. Mesbahi and M. Egerstedt, \textit{Graph Theoretic Methods in Multiagent Networks}, Princeton University Press, 2010.
+
+\bibitem{gerkey2004} B. P. Gerkey and M. J. Mataric, ``A formal analysis and taxonomy of task allocation in multi-robot systems,'' \textit{International Journal of Robotics Research}, 2004.
+
+\bibitem{olfati2006} R. Olfati-Saber, ``Flocking for multi-agent dynamic systems,'' \textit{IEEE Transactions on Automatic Control}, 2006.
+
+\end{thebibliography}
+
+\end{document}

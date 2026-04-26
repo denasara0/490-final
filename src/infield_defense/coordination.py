@@ -58,6 +58,7 @@ def delivery_costs(
     positions: npt.NDArray[np.float64],
     base_pos: npt.NDArray[np.float64],
     vmax: float,
+    tau_handoff: float = 0.0,
 ) -> tuple[float, int | None]:
     """
     After someone has the ball, estimate the fastest way to get it to base.
@@ -71,6 +72,7 @@ def delivery_costs(
         positions: All robot positions, shape (N, 2).
         base_pos: Target base [x, y].
         vmax: Top speed used for every leg.
+        tau_handoff: Fixed delay to represent a handoff/pass at the relay (seconds).
 
     Returns:
         (best_time, relay_partner_or_none)
@@ -91,7 +93,7 @@ def delivery_costs(
         # Leg 1: holder to teammate. Leg 2: teammate to base.
         time_to_teammate = interception_time_estimate(holder_pos, positions[teammate_j], vmax)
         time_teammate_to_base = interception_time_estimate(positions[teammate_j], base_pos, vmax)
-        time_relay = time_to_teammate + time_teammate_to_base
+        time_relay = time_to_teammate + time_teammate_to_base + max(0.0, float(tau_handoff))
 
         if time_relay < best_relay_time:
             best_relay_time = time_relay
