@@ -19,13 +19,13 @@ We present a lightweight, end-to-end simulation of a baseball-inspired multi-rob
 \end{abstract}
 
 \section{Introduction}
-Multi-robot systems (MRS) must often allocate tasks online while maintaining team structure. Inspired by baseball infield defense, we consider a simplified scenario where multiple robots must (i) maintain a defensive formation, (ii) intercept a moving ground ball, and (iii) deliver the ball to a target base with minimal total time.
+Multi-robot systems (MRS) must often allocate tasks online while maintaining team structure. Inspired by baseball infield defense, we consider a simplified scenario where multiple robots must (i) maintain a defensive formation, (ii) intercept a moving ground ball, and (iii) record a force out against a runner advancing around the bases.
 
 \textbf{Contribution.} Our contribution is a complete, runnable simulation pipeline that integrates:
 \begin{itemize}
     \item decentralized formation control on a ring communication graph,
     \item per-robot interception bidding (including a moving-ball predicted bid),
-    \item a transparent post-capture delivery-time model (direct vs. relay),
+    \item a runner-aware post-capture force-play model (direct vs. relay),
     \item a headless repeated-trial evaluation runner that generates a CSV for tables/plots.
 \end{itemize}
 We do not claim a new task-allocation primitive; rather, we make the architecture and evaluation protocol explicit and measurable.
@@ -69,13 +69,24 @@ using only neighbor positions. In the simulator, commands are clipped to respect
 \end{equation}
 Each robot can compute \(\tau_i^\ast\) given its own \(p_i\) and broadcast ball parameters \((p_0,v_0,a,t_0)\). In our implementation, \(\tau_i^\ast\) is computed by per-robot sampling in \([0,H]\) and a short binary search inside the first feasible bracket.
 
-\noindent The primary fielder is selected by
+\noindent We then apply a lightweight baseball-style ownership bias: the infielder whose home position is closest to the ball's forward trajectory ray is treated as the trajectory owner, and non-owners incur a small score penalty unless they beat the owner's intercept time by a fixed margin. This preserves the moving-ball prediction while reducing unrealistic cross-field cutoffs on balls that stay in one fielder's lane.
+
+\noindent The primary fielder is selected by the minimum biased fielding score, with a non-owner override only when its raw intercept time is sufficiently smaller than the owner's.
 \begin{equation}
-i^\ast = \arg\min_i \tau_i^\ast .
+s_i = \tau_i^\ast + \lambda \,\mathbf{1}[i \neq i_{\mathrm{owner}}],
 \end{equation}
+\begin{equation}
+i^\ast =
+\begin{cases}
+\arg\min_{i \neq i_{\mathrm{owner}}} \tau_i^\ast, & \text{if } \tau_i^\ast + \delta < \tau_{i_{\mathrm{owner}}}^\ast \text{ for some non-owner,}\\
+i_{\mathrm{owner}}, & \text{otherwise when the owner is feasible,}\\
+\arg\min_i s_i, & \text{otherwise.}
+\end{cases}
+\end{equation}
+\noindent The selected primary then runs toward its predicted intercept point \(p_b(t+\tau_{i^\ast}^\ast)\) rather than the ball's instantaneous position.
 
 \subsection{Delivery model: direct vs. relay}
-After interception, we compare direct carry to a one-hop relay using straight-line legs at speed \(v_{\max}\). Let \(p_{\mathrm{base}}\) be the base position and let \(\tau_{\mathrm{hp}}\ge 0\) be a fixed handoff delay:
+After interception, we compare direct carry to a one-hop relay using straight-line legs at speed \(v_{\max}\). A batter-runner starts at home and advances around the basepath at the same speed bound. At each moment, the defense targets the runner's current force base \(p_{\mathrm{base}}\), and an out is recorded only if the ball carrier reaches that base before the runner. Let \(\tau_{\mathrm{hp}}\ge 0\) be a fixed handoff delay:
 \begin{equation}
 C_{\mathrm{direct}} = \frac{\|p_{i^\ast} - p_{\mathrm{base}}\|}{v_{\max}},
 \end{equation}
@@ -92,13 +103,13 @@ Our \emph{implementation} is a centralized simulator harness that advances time,
 \begin{itemize}
     \item \texttt{coordination.interception\_time\_estimate} (Eq.~\ref{eq:Ti-hat}),
     \item \texttt{coordination.interception\_time\_to\_moving\_ball} (Eq.~\ref{eq:pred-bid}),
-    \item \texttt{coordination.select\_primary\_fielder\_predicted} (argmin over bids).
+    \item \texttt{coordination.plan\_fielding\_assignment} (trajectory-aware owner-biased assignment).
 \end{itemize}
 The simulator executes these computations centrally for convenience, but their inputs/outputs are per-agent and consistent with a distributed message-passing interpretation.
 
 \section{Experimental Design}
 \subsection{Protocol}
-We use a headless evaluation runner (\texttt{python3 -m infield\_defense.evaluate}) that runs \(K=50\) randomized trials per setting and writes \texttt{results/eval.csv}. Ball launches are randomized within bounded ranges for initial position/velocity; each episode ends on success (intercept + delivery) or at a time limit.
+We use a headless evaluation runner (\texttt{python3 -m infield\_defense.evaluate}) that runs \(K=50\) randomized trials per setting and writes \texttt{results/eval.csv}. Ball launches are randomized within bounded ranges for initial position/velocity; each episode ends on a recorded out, a runner score, or a time limit.
 
 \subsection{Baselines}
 We compare three methods:
@@ -147,7 +158,7 @@ ours\_relay & 92.0 & 0.0 & 16.552 $\pm$ 0.472 \\
 Our simulation simplifies perception, dynamics, and ball handling. The most important modeling limitation for relay evaluation is that delivery legs are modeled with the same running speed. A more realistic relay would model a faster throw/pass speed \(v_{\mathrm{throw}}>v_{\max}\) plus a handoff time; this extension would create regimes where relay delivery outperforms direct carry, especially for longer base distances.
 
 \section{Conclusion}
-We implemented an end-to-end infield-defense-inspired MRS simulation with decentralized formation control, per-robot interception bidding (including a moving-ball predicted bid), and a headless evaluation harness that produces quantitative baseline comparisons. The current delivery model is transparent and measurable, and the next step for relay realism is incorporating a faster pass/throw model.
+We implemented an end-to-end infield-defense-inspired MRS simulation with decentralized formation control, per-robot interception bidding (including a moving-ball predicted bid), and a headless evaluation harness that produces quantitative baseline comparisons. The current force-play model is transparent and measurable, and the next step for relay realism is incorporating a faster pass/throw model.
 
 \begin{thebibliography}{00}
 \bibitem{mesbahi2010} M. Mesbahi and M. Egerstedt, \textit{Graph Theoretic Methods in Multiagent Networks}, Princeton University Press, 2010.

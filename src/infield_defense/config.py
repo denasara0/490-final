@@ -24,6 +24,16 @@ class FieldConfig:
             "third": self.third_base,
         }
 
+    def base_path_order(self) -> tuple[str, str, str, str, str]:
+        return ("home", "first", "second", "third", "home")
+
+    def covering_role_for_base(self, base_name: str) -> str | None:
+        return {
+            "first": "1st baseman",
+            "second": "2nd baseman",
+            "third": "3rd baseman",
+        }.get(base_name)
+
     def infielder_positions(self) -> dict[str, tuple[float, float]]:
         return {
             "Shortstop": (0,0),
@@ -36,6 +46,7 @@ class FieldConfig:
 @dataclass(frozen=True)
 class DynamicsConfig:
     vmax: float = 6.0
+    pass_speed: float = 18.0
     formation_gain: float = 0.8
     dt: float = 0.05
     ball_decel: float = 2.5

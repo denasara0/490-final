@@ -61,6 +61,8 @@ def run_sweep(
                 "ball_v0_x",
                 "ball_v0_y",
                 "success",
+                "out_recorded",
+                "runner_scored",
                 "t_intercept",
                 "t_delivery",
                 "t_total",
@@ -158,4 +160,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

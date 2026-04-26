@@ -1,6 +1,6 @@
 # Multi-robot infield defense (MRS 490 final)
 
-Distributed intercept and relay coordination inspired by baseball infield play: formation control, ground-ball kinematics, time-to-intercept bidding, and direct vs relay delivery to base (see project proposal).
+Distributed intercept and relay coordination inspired by baseball infield play: formation control, ground-ball kinematics, time-to-intercept bidding, and runner-aware force-out resolution around the bases (see project proposal).
 
 ## Environment
 
@@ -8,7 +8,7 @@ Python 3.10+ recommended (tested with 3.13).
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
@@ -20,7 +20,7 @@ infield-sim
 python -m infield_defense.cli
 ```
 
-This opens a matplotlib animation: robots hold a ring formation, then a sample ground ball is launched and a primary fielder is chosen by lowest estimated interception time.
+This opens a matplotlib animation: robots hold a ring formation, then a sample ground ball is launched, a batter-runner circles the bases, and the defense must field the ball and beat the runner to the current force base.
 
 ## Report
 
@@ -41,8 +41,9 @@ This runs repeated trials across a small sweep of \(N\) and \(v_{\max}\), compar
 - `src/infield_defense/config.py` — field bounds, `v_max`, formation gain, timestep
 - `src/infield_defense/ball.py` — trajectory \(p_b(t) = p_0 + v_0 t + \frac{1}{2} a t^2\)
 - `src/infield_defense/formation.py` — decentralized spacing control on a ring graph
-- `src/infield_defense/coordination.py` — interception bids and delivery cost (Algorithms 1–2)
-- `src/infield_defense/simulation.py` — state and timestep hooks
+- `src/infield_defense/coordination.py` — trajectory-aware fielding planner, interception bids, and delivery cost (Algorithms 1–2)
+- `src/infield_defense/baserunning.py` — runner state and basepath progression helpers
+- `src/infield_defense/simulation.py` — shared play state and timestep hooks for headless + live simulation
 - `src/infield_defense/cli.py` — demo viewer
 - `src/infield_defense/evaluate.py` — headless repeated-trial runner (CSV + aggregate table)
 
