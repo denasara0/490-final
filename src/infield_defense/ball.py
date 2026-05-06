@@ -1,13 +1,3 @@
-"""
-Ground ball motion in 2D (no fancy spin — just simple kinematics).
-
-The proposal uses the standard physics formula for motion with constant acceleration::
-
-    position(t) = start_position + start_velocity * t + 0.5 * acceleration * t^2
-
-In code we write vectors as NumPy arrays with two numbers: [x, y].
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -36,7 +26,7 @@ def ball_position(
     p0 = np.asarray(p0, dtype=np.float64)
     v0 = np.asarray(v0, dtype=np.float64)
     a = np.asarray(a, dtype=np.float64)
-    # Classic constant-acceleration formula, applied separately to x and y.
+    
     return p0 + v0 * t + 0.5 * a * (t**2)
 
 
@@ -45,7 +35,4 @@ def ball_velocity(
     v0: npt.NDArray[np.float64],
     a: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.float64]:
-    """
-    Ball velocity at time ``t``: v0 + a*t (derivative of the position formula).
-    """
     return np.asarray(v0, dtype=np.float64) + np.asarray(a, dtype=np.float64) * float(t)

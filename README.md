@@ -35,6 +35,17 @@ python -m infield_defense.evaluate
 ```
 
 This runs repeated trials across a small sweep of \(N\) and \(v_{\max}\), compares baselines, and writes `results/eval.csv` for tables/plots.
+Each episode is labeled as `out` (success), `run` (failure), or `foul` (null), and the aggregate table reports counts/rates for all three outcomes.
+
+## Analyze evaluation output
+
+```bash
+infield-analyze
+# or
+python -m infield_defense.analyze_eval
+```
+
+This reads `results/eval.csv`, refreshes `results/eval_summary.csv`, and writes plots plus helper CSVs under `results/analysis/`.
 
 ## Layout
 

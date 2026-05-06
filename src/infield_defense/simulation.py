@@ -88,6 +88,7 @@ class EpisodeConfig:
 
     intercept_radius: float = 0.5
     base_radius: float = 0.75
+    foul_detection_radius: float = 0.5
     handoff_radius: float = 0.75
     tau_handoff: float = 0.0
     pass_speed: float = DEFAULT_DYNAMICS.pass_speed
@@ -175,6 +176,18 @@ def make_play_state() -> PlayState:
     return PlayState()
 
 
+def play_outcome(play: PlayState) -> str:
+    if play.out_recorded:
+        return "out"
+    if play.runner_scored:
+        return "run"
+    if play.dead_ball_reason == "foul":
+        return "foul"
+    if play.dead_ball_reason is not None:
+        return play.dead_ball_reason
+    return "unresolved"
+
+
 def step_formation(
     state: SimState,
     field: FieldConfig = DEFAULT_FIELD,
@@ -195,6 +208,32 @@ def current_ball_pos(state: SimState, t: float) -> npt.NDArray[np.float64]:
         return state.ball.p0.copy()
     time_since_start = t - state.ball.t0
     return ball_position(time_since_start, state.ball.p0, state.ball.v0, state.ball.a)
+
+
+def is_in_fair_territory(
+    ball_xy: npt.NDArray[np.float64],
+    *,
+    field: FieldConfig = DEFAULT_FIELD,
+) -> bool:
+    home = np.asarray(field.home_base, dtype=np.float64)
+    relative_xy = np.asarray(ball_xy, dtype=np.float64) - home
+    # Treat line balls as fair, even with tiny floating-point drift.
+    return float(relative_xy[1]) + 1e-9 >= abs(float(relative_xy[0]))
+
+
+def detect_dead_ball_reason(
+    ball_xy: npt.NDArray[np.float64],
+    *,
+    field: FieldConfig = DEFAULT_FIELD,
+    foul_detection_radius: float = 0.5,
+) -> str | None:
+    home = np.asarray(field.home_base, dtype=np.float64)
+    distance_from_home = float(np.linalg.norm(np.asarray(ball_xy, dtype=np.float64) - home))
+    if distance_from_home >= float(foul_detection_radius) and not is_in_fair_territory(
+        ball_xy, field=field
+    ):
+        return "foul"
+    return None
 
 
 def current_force_base_name(
@@ -329,6 +368,68 @@ def _set_live_status(
             play.result_text = f"Ball in play: runner racing to {force_base}"
 
 
+def _delivery_elapsed(play: PlayState, simulation_time: float) -> float:
+    if play.intercept_time is None:
+        return float("nan")
+    return simulation_time - play.intercept_time
+
+
+def _record_runner_score(play: PlayState, simulation_time: float) -> None:
+    play.runner_scored = True
+    play.total_time = simulation_time
+    play.delivery_time = _delivery_elapsed(play, simulation_time)
+    play.result_text = "Runner scores"
+
+
+def _record_force_out(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    force_base_name: str,
+    holder_idx: int,
+) -> None:
+    mark_runner_out(state.runner)
+    play.out_recorded = True
+    play.total_time = simulation_time
+    play.delivery_time = _delivery_elapsed(play, simulation_time)
+    play.result_text = f"Out at {force_base_name} by {state.role_names[holder_idx]}"
+
+
+def _advance_runner_and_update_play(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    dt: float,
+    speed: float,
+    field: FieldConfig,
+    touch_radius: float,
+) -> str | None:
+    reached_base_name = advance_runner(
+        state.runner,
+        dt=dt,
+        speed=speed,
+        field=field,
+        touch_radius=touch_radius,
+    )
+    if reached_base_name is None:
+        return None
+    if state.runner.scored:
+        _record_runner_score(play, simulation_time)
+        return reached_base_name
+    play.result_text = f"Runner advances to {reached_base_name}"
+    return reached_base_name
+
+
+def _clear_pass_tracking(play: PlayState) -> None:
+    play.pass_in_flight = False
+    play.pass_start_time = None
+    play.pass_arrival_time = None
+    play.pass_start_pos = None
+    play.pass_end_pos = None
+
+
 def _maybe_replan_relay(
     state: SimState,
     play: PlayState,
@@ -373,11 +474,7 @@ def _maybe_replan_relay(
     play.relay_partner = relay_partner
     play.selected_relay_partner = relay_partner
     play.relay_target_base = force_base_name
-    play.pass_in_flight = False
-    play.pass_start_time = None
-    play.pass_arrival_time = None
-    play.pass_start_pos = None
-    play.pass_end_pos = None
+    _clear_pass_tracking(play)
     play.handoff_done = False
     play.handoff_timer = 0.0
 
@@ -404,6 +501,225 @@ def current_controlled_ball_position(
     return state.ball.p0.copy()
 
 
+def _step_relay_delivery(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    dt: float,
+    vmax: float,
+    field: FieldConfig,
+    base_radius: float,
+    tau_handoff: float,
+    pass_speed: float,
+) -> None:
+    relay_partner = play.relay_partner
+    holder_idx = play.holder_idx
+    if relay_partner is None or holder_idx is None:
+        return
+
+    relay_target = state.positions[relay_partner].copy()
+    if not play.pass_in_flight:
+        play.pass_in_flight = True
+        play.pass_start_time = simulation_time
+        play.pass_start_pos = state.positions[holder_idx].copy()
+        play.pass_end_pos = relay_target
+        pass_distance = float(np.linalg.norm(play.pass_end_pos - play.pass_start_pos))
+        flight_time = pass_distance / max(1e-9, float(pass_speed))
+        play.pass_arrival_time = simulation_time + max(0.0, float(tau_handoff)) + flight_time
+
+    reached_base_name = _advance_runner_and_update_play(
+        state,
+        play,
+        simulation_time,
+        dt=dt,
+        speed=vmax,
+        field=field,
+        touch_radius=base_radius,
+    )
+    if play.resolved:
+        return
+    if reached_base_name is not None:
+        play.relay_target_base = None
+
+    if play.pass_arrival_time is not None and simulation_time >= play.pass_arrival_time:
+        play.holder_idx = relay_partner
+        play.relay_used = True
+        play.handoff_done = True
+        _clear_pass_tracking(play)
+        play.relay_partner = None
+        play.relay_target_base = None
+        _freeze_ball(state, simulation_time, state.positions[play.holder_idx].copy())
+
+
+def _step_controlled_ball_play(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    method: str,
+    field: FieldConfig,
+    vmax: float,
+    dt: float,
+    base_radius: float,
+    tau_handoff: float,
+    pass_speed: float,
+) -> None:
+    holder_idx = play.holder_idx
+    if holder_idx is None:
+        return
+
+    _maybe_replan_relay(
+        state,
+        play,
+        method=method,
+        vmax=vmax,
+        pass_speed=pass_speed,
+        tau_handoff=tau_handoff,
+        field=field,
+    )
+    force_base_name = current_force_base_name(state, field=field)
+    force_base_pos = current_force_base_position(state, field=field)
+    _set_live_status(state, play, holder_idx=holder_idx, force_base_name=force_base_name)
+
+    if force_base_name is None or force_base_pos is None:
+        _record_runner_score(play, simulation_time)
+        return
+
+    if play.relay_partner is not None and not play.handoff_done:
+        _step_relay_delivery(
+            state,
+            play,
+            simulation_time,
+            dt=dt,
+            vmax=vmax,
+            field=field,
+            base_radius=base_radius,
+            tau_handoff=tau_handoff,
+            pass_speed=pass_speed,
+        )
+        return
+
+    direction = _unit_or_zero(force_base_pos - state.positions[holder_idx])
+    state.velocities[holder_idx] = direction * vmax
+    state.positions += state.velocities * dt
+    _clip_to_field(state.positions, field)
+
+    reached_base_name = _advance_runner_and_update_play(
+        state,
+        play,
+        simulation_time,
+        dt=dt,
+        speed=vmax,
+        field=field,
+        touch_radius=base_radius,
+    )
+    if play.resolved:
+        return
+    if reached_base_name is not None:
+        play.relay_target_base = None
+        if force_base_name != reached_base_name:
+            holder_idx = play.holder_idx
+            if holder_idx is None:
+                return
+
+    current_force_name = current_force_base_name(state, field=field)
+    if (
+        current_force_name == force_base_name
+        and float(np.linalg.norm(state.positions[holder_idx] - force_base_pos)) <= base_radius
+    ):
+        _record_force_out(
+            state,
+            play,
+            simulation_time,
+            force_base_name=force_base_name,
+            holder_idx=holder_idx,
+        )
+
+
+def _step_runner_only_play(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    dt: float,
+    vmax: float,
+    field: FieldConfig,
+    base_radius: float,
+) -> None:
+    _set_live_status(state, play)
+    _advance_runner_and_update_play(
+        state,
+        play,
+        simulation_time,
+        dt=dt,
+        speed=vmax,
+        field=field,
+        touch_radius=base_radius,
+    )
+
+
+def _step_live_ball_pursuit(
+    state: SimState,
+    play: PlayState,
+    simulation_time: float,
+    *,
+    method: str,
+    field: FieldConfig,
+    vmax: float,
+    formation_gain: float,
+    dt: float,
+    intercept_radius: float,
+    base_radius: float,
+) -> None:
+    ball_xy = current_ball_pos(state, simulation_time)
+    primary = state.primary_idx
+    if primary is None:
+        return
+    pursuit_target = ball_xy
+
+    if method != "nearest_direct":
+        decision = plan_current_fielding_decision(state, simulation_time, vmax=vmax, sample_dt_s=dt)
+        if decision is not None:
+            state.primary_idx = decision.primary_idx
+            primary = decision.primary_idx
+            pursuit_target = decision.primary_intercept_point
+
+    direction = _unit_or_zero(pursuit_target - state.positions[primary])
+    state.velocities[primary] = direction * vmax
+
+    raw_command = formation_control_input(state.positions, state.neighbors, formation_gain)
+    for idx in range(state.positions.shape[0]):
+        if idx == primary:
+            continue
+        state.velocities[idx] = clip_speed(raw_command[idx], vmax)
+
+    state.positions += state.velocities * dt
+    _clip_to_field(state.positions, field)
+
+    reached_base_name = _advance_runner_and_update_play(
+        state,
+        play,
+        simulation_time,
+        dt=dt,
+        speed=vmax,
+        field=field,
+        touch_radius=base_radius,
+    )
+    if play.resolved:
+        return
+    if reached_base_name is None:
+        _set_live_status(state, play)
+
+    if float(np.linalg.norm(state.positions[primary] - ball_xy)) <= intercept_radius:
+        play.intercept_time = simulation_time
+        play.has_ball = True
+        play.holder_idx = primary
+        _freeze_ball(state, simulation_time, state.positions[primary].copy())
+        force_base_name = current_force_base_name(state, field=field)
+        _set_live_status(state, play, holder_idx=primary, force_base_name=force_base_name)
+
+
 def step_live_play(
     state: SimState,
     play: PlayState,
@@ -426,182 +742,138 @@ def step_live_play(
     state.velocities[:] = 0.0
 
     if play.has_ball and play.holder_idx is not None:
-        holder_idx = play.holder_idx
-        _maybe_replan_relay(
+        _step_controlled_ball_play(
             state,
             play,
+            simulation_time,
             method=method,
+            field=field,
             vmax=vmax,
-            pass_speed=pass_speed,
-            tau_handoff=tau_handoff,
-            field=field,
-        )
-        force_base_name = current_force_base_name(state, field=field)
-        force_base_pos = current_force_base_position(state, field=field)
-        _set_live_status(state, play, holder_idx=holder_idx, force_base_name=force_base_name)
-
-        if force_base_name is None or force_base_pos is None:
-            play.runner_scored = True
-            play.total_time = simulation_time
-            play.delivery_time = (
-                simulation_time - play.intercept_time if play.intercept_time is not None else float("nan")
-            )
-            play.result_text = "Runner scores"
-            return
-
-        if play.relay_partner is not None and not play.handoff_done:
-            relay_target = state.positions[play.relay_partner].copy()
-            if not play.pass_in_flight:
-                play.pass_in_flight = True
-                play.pass_start_time = simulation_time
-                play.pass_start_pos = state.positions[holder_idx].copy()
-                play.pass_end_pos = relay_target
-                pass_distance = float(np.linalg.norm(play.pass_end_pos - play.pass_start_pos))
-                flight_time = pass_distance / max(1e-9, float(pass_speed))
-                play.pass_arrival_time = simulation_time + max(0.0, float(tau_handoff)) + flight_time
-
-            reached_base_name = advance_runner(
-                state.runner,
-                dt=dt,
-                speed=vmax,
-                field=field,
-                touch_radius=base_radius,
-            )
-            if reached_base_name is not None:
-                if state.runner.scored:
-                    play.runner_scored = True
-                    play.total_time = simulation_time
-                    play.delivery_time = (
-                        simulation_time - play.intercept_time
-                        if play.intercept_time is not None
-                        else float("nan")
-                    )
-                    play.result_text = "Runner scores"
-                    return
-                play.result_text = f"Runner advances to {reached_base_name}"
-                play.relay_target_base = None
-
-            if play.pass_arrival_time is not None and simulation_time >= play.pass_arrival_time:
-                play.holder_idx = play.relay_partner
-                play.relay_used = True
-                play.handoff_done = True
-                play.pass_in_flight = False
-                play.pass_start_time = None
-                play.pass_arrival_time = None
-                play.pass_start_pos = None
-                play.pass_end_pos = None
-                play.relay_partner = None
-                play.relay_target_base = None
-                _freeze_ball(state, simulation_time, state.positions[play.holder_idx].copy())
-            return
-
-        direction = _unit_or_zero(force_base_pos - state.positions[holder_idx])
-        state.velocities[holder_idx] = direction * vmax
-        state.positions += state.velocities * dt
-        _clip_to_field(state.positions, field)
-
-        reached_base_name = advance_runner(
-            state.runner,
             dt=dt,
-            speed=vmax,
-            field=field,
-            touch_radius=base_radius,
+            base_radius=base_radius,
+            tau_handoff=tau_handoff,
+            pass_speed=pass_speed,
         )
-        if reached_base_name is not None:
-            if state.runner.scored:
-                play.runner_scored = True
-                play.total_time = simulation_time
-                play.delivery_time = (
-                    simulation_time - play.intercept_time
-                    if play.intercept_time is not None
-                    else float("nan")
-                )
-                play.result_text = "Runner scores"
-                return
-            play.result_text = f"Runner advances to {reached_base_name}"
-            play.relay_target_base = None
-            if force_base_name != reached_base_name:
-                holder_idx = play.holder_idx
-
-        current_force_name = current_force_base_name(state, field=field)
-        if (
-            current_force_name == force_base_name
-            and float(np.linalg.norm(state.positions[holder_idx] - force_base_pos)) <= base_radius
-        ):
-            mark_runner_out(state.runner)
-            play.out_recorded = True
-            play.total_time = simulation_time
-            play.delivery_time = (
-                simulation_time - play.intercept_time if play.intercept_time is not None else float("nan")
-            )
-            play.result_text = f"Out at {force_base_name} by {state.role_names[holder_idx]}"
         return
 
     if not state.ball.active or state.primary_idx is None:
-        _set_live_status(state, play)
-        reached_base_name = advance_runner(
-            state.runner,
+        _step_runner_only_play(
+            state,
+            play,
+            simulation_time,
             dt=dt,
-            speed=vmax,
+            vmax=vmax,
             field=field,
-            touch_radius=base_radius,
+            base_radius=base_radius,
         )
-        if reached_base_name is not None:
-            if state.runner.scored:
-                play.runner_scored = True
-                play.total_time = simulation_time
-                play.result_text = "Runner scores"
-                return
-            play.result_text = f"Runner advances to {reached_base_name}"
         return
 
-    ball_xy = current_ball_pos(state, simulation_time)
-    primary = state.primary_idx
-    pursuit_target = ball_xy
+    _step_live_ball_pursuit(
+        state,
+        play,
+        simulation_time,
+        method=method,
+        field=field,
+        vmax=vmax,
+        formation_gain=formation_gain,
+        dt=dt,
+        intercept_radius=intercept_radius,
+        base_radius=base_radius,
+    )
 
-    if method != "nearest_direct":
-        decision = plan_current_fielding_decision(state, simulation_time, vmax=vmax, sample_dt_s=dt)
-        if decision is not None:
-            state.primary_idx = decision.primary_idx
-            primary = decision.primary_idx
-            pursuit_target = decision.primary_intercept_point
 
-    direction = _unit_or_zero(pursuit_target - state.positions[primary])
-    state.velocities[primary] = direction * vmax
-
-    raw_command = formation_control_input(state.positions, state.neighbors, formation_gain)
+def _step_prelaunch_formation(
+    state: SimState,
+    cfg: EpisodeConfig,
+    field: FieldConfig,
+) -> None:
+    raw_command = formation_control_input(state.positions, state.neighbors, cfg.formation_gain)
+    state.velocities = np.zeros_like(state.positions)
     for idx in range(state.positions.shape[0]):
-        if idx == primary:
-            continue
-        state.velocities[idx] = clip_speed(raw_command[idx], vmax)
-
-    state.positions += state.velocities * dt
+        state.velocities[idx] = clip_speed(raw_command[idx], cfg.vmax)
+    state.positions += state.velocities * cfg.dt
     _clip_to_field(state.positions, field)
 
-    reached_base_name = advance_runner(
-        state.runner,
-        dt=dt,
-        speed=vmax,
-        field=field,
-        touch_radius=base_radius,
-    )
-    if reached_base_name is not None:
-        if state.runner.scored:
-            play.runner_scored = True
-            play.total_time = simulation_time
-            play.result_text = "Runner scores"
-            return
-        play.result_text = f"Runner advances to {reached_base_name}"
-    else:
-        _set_live_status(state, play)
 
-    if float(np.linalg.norm(state.positions[primary] - ball_xy)) <= intercept_radius:
-        play.intercept_time = simulation_time
-        play.has_ball = True
-        play.holder_idx = primary
-        _freeze_ball(state, simulation_time, state.positions[primary].copy())
-        force_base_name = current_force_base_name(state, field=field)
-        _set_live_status(state, play, holder_idx=primary, force_base_name=force_base_name)
+def _launch_episode_play(
+    state: SimState,
+    play: PlayState,
+    t: float,
+    cfg: EpisodeConfig,
+    *,
+    method: str,
+    field: FieldConfig,
+) -> None:
+    launch_ground_ball(
+        state,
+        t,
+        p0=np.array(cfg.ball_p0, dtype=np.float64),
+        v0=np.array(cfg.ball_v0, dtype=np.float64),
+        decel_magnitude=cfg.ball_decel,
+        vmax=cfg.vmax,
+        field=field,
+    )
+    play.launched = True
+    play.result_text = "Ball in play: runner racing to first"
+
+    if method == "nearest_direct":
+        ball_now = current_ball_pos(state, t)
+        dists = np.linalg.norm(state.positions - ball_now[None, :], axis=1)
+        state.primary_idx = int(np.argmin(dists))
+
+
+def _maybe_resolve_live_dead_ball(
+    state: SimState,
+    play: PlayState,
+    t: float,
+    *,
+    field: FieldConfig,
+    foul_detection_radius: float,
+) -> bool:
+    if not state.ball.active:
+        return False
+
+    live_ball_xy = current_ball_pos(state, t)
+    dead_ball_reason = detect_dead_ball_reason(
+        live_ball_xy,
+        field=field,
+        foul_detection_radius=foul_detection_radius,
+    )
+    if dead_ball_reason is None:
+        return False
+
+    play.dead_ball_reason = dead_ball_reason
+    play.total_time = t
+    play.result_text = "Foul ball"
+    _freeze_ball(state, t, live_ball_xy)
+    return True
+
+
+def _episode_metrics(
+    state: SimState,
+    play: PlayState,
+) -> dict[str, float | int | bool | str | None]:
+    outcome = play_outcome(play)
+    success = outcome == "out"
+    failure = outcome == "run"
+    is_null = outcome == "foul"
+    return {
+        "success": bool(success),
+        "failure": bool(failure),
+        "is_null": bool(is_null),
+        "outcome": outcome,
+        "out_recorded": bool(play.out_recorded),
+        "runner_scored": bool(play.runner_scored),
+        "dead_ball_reason": play.dead_ball_reason,
+        "t_intercept": float(play.intercept_time) if play.intercept_time is not None else float("nan"),
+        "t_delivery": float(play.delivery_time) if play.delivery_time is not None else float("nan"),
+        "t_total": float(play.total_time) if play.total_time is not None else float("nan"),
+        "primary_idx": int(state.primary_idx) if state.primary_idx is not None else -1,
+        "relay_used": bool(play.relay_used),
+        "relay_partner": (
+            int(play.selected_relay_partner) if play.selected_relay_partner is not None else -1
+        ),
+    }
 
 
 def run_episode(
@@ -609,7 +881,7 @@ def run_episode(
     *,
     method: str = "ours_relay",
     field: FieldConfig = DEFAULT_FIELD,
-) -> dict[str, float | int | bool | None]:
+) -> dict[str, float | int | bool | str | None]:
     """
     Run one episode and return scalar metrics for tables/CSV.
     """
@@ -626,33 +898,20 @@ def run_episode(
         t += cfg.dt
 
         if not play.launched and t < cfg.launch_time:
-            raw_command = formation_control_input(
-                state.positions, state.neighbors, cfg.formation_gain
-            )
-            state.velocities = np.zeros_like(state.positions)
-            for idx in range(state.positions.shape[0]):
-                state.velocities[idx] = clip_speed(raw_command[idx], cfg.vmax)
-            state.positions += state.velocities * cfg.dt
-            _clip_to_field(state.positions, field)
+            _step_prelaunch_formation(state, cfg, field)
             continue
 
         if not play.launched:
-            launch_ground_ball(
-                state,
-                t,
-                p0=np.array(cfg.ball_p0, dtype=np.float64),
-                v0=np.array(cfg.ball_v0, dtype=np.float64),
-                decel_magnitude=cfg.ball_decel,
-                vmax=cfg.vmax,
-                field=field,
-            )
-            play.launched = True
-            play.result_text = "Ball in play: runner racing to first"
+            _launch_episode_play(state, play, t, cfg, method=method, field=field)
 
-            if method == "nearest_direct":
-                ball_now = current_ball_pos(state, t)
-                dists = np.linalg.norm(state.positions - ball_now[None, :], axis=1)
-                state.primary_idx = int(np.argmin(dists))
+        if _maybe_resolve_live_dead_ball(
+            state,
+            play,
+            t,
+            field=field,
+            foul_detection_radius=cfg.foul_detection_radius,
+        ):
+            continue
 
         step_live_play(
             state,
@@ -670,17 +929,4 @@ def run_episode(
             pass_speed=cfg.pass_speed,
         )
 
-    success = play.out_recorded
-    return {
-        "success": bool(success),
-        "out_recorded": bool(play.out_recorded),
-        "runner_scored": bool(play.runner_scored),
-        "t_intercept": float(play.intercept_time) if play.intercept_time is not None else float("nan"),
-        "t_delivery": float(play.delivery_time) if play.delivery_time is not None else float("nan"),
-        "t_total": float(play.total_time) if play.total_time is not None else float("nan"),
-        "primary_idx": int(state.primary_idx) if state.primary_idx is not None else -1,
-        "relay_used": bool(play.relay_used),
-        "relay_partner": (
-            int(play.selected_relay_partner) if play.selected_relay_partner is not None else -1
-        ),
-    }
+    return _episode_metrics(state, play)

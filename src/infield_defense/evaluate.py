@@ -1,14 +1,6 @@
-"""
-Headless evaluation runner for repeated-trial metrics and baselines.
-
-This is meant to generate the quantitative tables referenced in the report:
-run K trials per setting, compare simple baselines, and write a CSV for plots.
-"""
-
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -61,8 +53,12 @@ def run_sweep(
                 "ball_v0_x",
                 "ball_v0_y",
                 "success",
+                "failure",
+                "is_null",
+                "outcome",
                 "out_recorded",
                 "runner_scored",
+                "dead_ball_reason",
                 "t_intercept",
                 "t_delivery",
                 "t_total",
@@ -114,14 +110,15 @@ def run_sweep(
                                 )
 
 
-def print_table_from_csv(csv_path: Path) -> None:
-    rows: list[dict[str, str]] = []
+def _load_rows(csv_path: Path) -> list[dict[str, str]]:
     with csv_path.open("r", newline="") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)
+        return list(reader)
 
+
+def summarize_rows(rows: list[dict[str, str]]) -> list[dict[str, float | int | str]]:
     # Group by (method, n_robots, vmax, base_scale, tau_handoff)
-    keys = {}
+    keys: dict[tuple[str, int, float, float, float], list[dict[str, str]]] = {}
     for r in rows:
         key = (
             r["method"],
@@ -132,18 +129,99 @@ def print_table_from_csv(csv_path: Path) -> None:
         )
         keys.setdefault(key, []).append(r)
 
-    print("method,n,vmax,base_scale,tau_handoff,success_pct,relay_used_pct,t_total_mean,t_total_std,t_total_med,t_total_p90")
+    summary_rows: list[dict[str, float | int | str]] = []
     for (method, n, vmax, base_scale, tau), group in sorted(keys.items()):
-        totals = [float(g["t_total"]) for g in group]
-        successes = [1.0 if g["success"].lower() == "true" else 0.0 for g in group]
-        relays = [1.0 if g["relay_used"].lower() == "true" else 0.0 for g in group]
-        success_pct = 100.0 * float(np.mean(successes))
-        relay_used_pct = 100.0 * float(np.mean(relays))
+        trial_count = len(group)
+        success_count = sum(1 for g in group if g["outcome"] == "out")
+        failure_count = sum(1 for g in group if g["outcome"] == "run")
+        foul_ball_count = sum(1 for g in group if g["outcome"] == "foul")
+        other_outcome_count = trial_count - success_count - failure_count - foul_ball_count
+        non_foul_trials = trial_count - foul_ball_count
+        resolved_group = [g for g in group if g["outcome"] in {"out", "run"}]
+        totals = [float(g["t_total"]) for g in resolved_group]
+        relays = [1.0 if g["relay_used"].lower() == "true" else 0.0 for g in resolved_group]
+        success_pct = 100.0 * success_count / max(1, non_foul_trials)
+        failure_pct = 100.0 * failure_count / max(1, non_foul_trials)
+        foul_ball_pct = 100.0 * foul_ball_count / max(1, trial_count)
+        relay_used_pct = 100.0 * float(np.mean(relays)) if relays else float("nan")
         mean, std, median, p90 = _summary_stats(totals)
+        summary_rows.append(
+            {
+                "method": method,
+                "n": n,
+                "vmax": vmax,
+                "base_scale": base_scale,
+                "tau_handoff": tau,
+                "trials": trial_count,
+                "non_foul_trials": non_foul_trials,
+                "resolved_trials": len(resolved_group),
+                "successes": success_count,
+                "failures": failure_count,
+                "foul_balls": foul_ball_count,
+                "other_outcomes": other_outcome_count,
+                "success_pct": success_pct,
+                "failure_pct": failure_pct,
+                "foul_ball_pct": foul_ball_pct,
+                "relay_used_pct": relay_used_pct,
+                "t_total_mean": mean,
+                "t_total_std": std,
+                "t_total_med": median,
+                "t_total_p90": p90,
+            }
+        )
+    return summary_rows
+
+
+def write_summary_csv(rows: list[dict[str, float | int | str]], out_csv: Path) -> None:
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "method",
+        "n",
+        "vmax",
+        "base_scale",
+        "tau_handoff",
+        "trials",
+        "non_foul_trials",
+        "resolved_trials",
+        "successes",
+        "failures",
+        "foul_balls",
+        "other_outcomes",
+        "success_pct",
+        "failure_pct",
+        "foul_ball_pct",
+        "relay_used_pct",
+        "t_total_mean",
+        "t_total_std",
+        "t_total_med",
+        "t_total_p90",
+    ]
+    with out_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_summary_csv_from_trials_csv(trials_csv: Path, out_csv: Path) -> None:
+    write_summary_csv(summarize_rows(_load_rows(trials_csv)), out_csv)
+
+
+def print_table_from_csv(csv_path: Path) -> None:
+    summary_rows = summarize_rows(_load_rows(csv_path))
+    header = (
+        "method,n,vmax,base_scale,tau_handoff,trials,non_foul_trials,resolved_trials,successes,"
+        "failures,foul_balls,other_outcomes,success_pct,failure_pct,foul_ball_pct,relay_used_pct,"
+        "t_total_mean,t_total_std,t_total_med,t_total_p90"
+    )
+    print(header)
+    for row in summary_rows:
         print(
-            f"{method},{n},{vmax},{base_scale},{tau},"
-            f"{success_pct:.1f},{relay_used_pct:.1f},"
-            f"{mean:.3f},{std:.3f},{median:.3f},{p90:.3f}"
+            f"{row['method']},{row['n']},{row['vmax']},{row['base_scale']},{row['tau_handoff']},"
+            f"{row['trials']},{row['non_foul_trials']},{row['resolved_trials']},{row['successes']},"
+            f"{row['failures']},{row['foul_balls']},{row['other_outcomes']},{row['success_pct']:.1f},"
+            f"{row['failure_pct']:.1f},{row['foul_ball_pct']:.1f},{row['relay_used_pct']:.1f},"
+            f"{row['t_total_mean']:.3f},{row['t_total_std']:.3f},{row['t_total_med']:.3f},"
+            f"{row['t_total_p90']:.3f}"
         )
 
 
@@ -151,11 +229,14 @@ def main() -> None:
     """
     Default run:
       - writes `results/eval.csv`
-      - prints an aggregate table to stdout
+      - writes `results/eval_summary.csv`
+      - prints the aggregate table to stdout
     """
-    out = Path("results/eval.csv")
-    run_sweep(out_csv=out, k_trials=50, seed=0)
-    print_table_from_csv(out)
+    trials_out = Path("results/eval.csv")
+    summary_out = Path("results/eval_summary.csv")
+    run_sweep(out_csv=trials_out, k_trials=50, seed=0)
+    write_summary_csv_from_trials_csv(trials_out, summary_out)
+    print_table_from_csv(trials_out)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from infield_defense.config import DEFAULT_DYNAMICS, DEFAULT_FIELD
 from infield_defense.simulation import (
     current_ball_pos,
     current_controlled_ball_position,
+    detect_dead_ball_reason,
     make_play_state,
     make_state,
     plan_current_fielding_decision,
@@ -118,11 +119,11 @@ def main() -> None:
         va="top",
         bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.9, "edgecolor": "0.7"},
     )
-    scoreboard = {"outs": 0, "fouls": 0, "runs": 0, "home_runs": 0}
+    scoreboard = {"outs": 0, "fouls": 0, "runs": 0}
     scoreboard_text = ax.text(
         0.02,
         0.89,
-        "Outs: 0  Fouls: 0  Runs: 0  Home runs: 0",
+        "Outs: 0  Fouls: 0  Runs: 0",
         transform=ax.transAxes,
         va="top",
         bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
@@ -160,15 +161,10 @@ def main() -> None:
         scoreboard_text.set_text(
             "Outs: "
             f"{scoreboard['outs']}  Fouls: {scoreboard['fouls']}  Runs: {scoreboard['runs']}  "
-            f"Home runs: {scoreboard['home_runs']}"
         )
 
     def distance_from_home(ball_xy: np.ndarray) -> float:
         return float(np.linalg.norm(ball_xy - home))
-
-    def is_in_fair_territory(ball_xy: np.ndarray) -> bool:
-        relative_xy = np.asarray(ball_xy, dtype=np.float64) - home
-        return float(relative_xy[1]) >= abs(float(relative_xy[0]))
 
     def stop_play(result_text: str, *, dead_ball_reason: str | None = None) -> None:
         play.dead_ball_reason = dead_ball_reason
@@ -275,20 +271,20 @@ def main() -> None:
         if play.launched and not play.resolved:
             if state.ball.active:
                 live_ball_xy = current_ball_pos(state, simulation_time)
-                foul_crossed = (
-                    distance_from_home(live_ball_xy) >= foul_detection_radius
-                    and not is_in_fair_territory(live_ball_xy)
+                dead_ball_reason = detect_dead_ball_reason(
+                    live_ball_xy,
+                    field=field,
+                    foul_detection_radius=foul_detection_radius,
                 )
-                if foul_crossed:
+                if dead_ball_reason == "foul":
                     scoreboard["fouls"] += 1
                     update_scoreboard()
                     ball_display_xy = live_ball_xy
                     runner_display_xy = state.runner.position.copy()
-                    stop_play("Foul ball", dead_ball_reason="foul")
+                    stop_play("Foul ball", dead_ball_reason=dead_ball_reason)
 
                 elif distance_from_home(live_ball_xy) >= outfield_radius:
                     scoreboard["runs"] += 1
-                    scoreboard["home_runs"] += 1
                     update_scoreboard()
                     ball_display_xy = live_ball_xy
                     runner_display_xy = state.runner.position.copy()

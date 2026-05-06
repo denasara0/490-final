@@ -114,6 +114,9 @@ def test_run_episode_records_runner_aware_force_out() -> None:
     metrics = run_episode(cfg, method="ours_direct")
 
     assert metrics["success"] is True
+    assert metrics["failure"] is False
+    assert metrics["is_null"] is False
+    assert metrics["outcome"] == "out"
     assert metrics["out_recorded"] is True
     assert metrics["runner_scored"] is False
     assert math.isfinite(float(metrics["t_intercept"]))
@@ -133,8 +136,34 @@ def test_run_episode_runner_can_score_before_any_out() -> None:
     metrics = run_episode(cfg, method="ours_direct")
 
     assert metrics["success"] is False
+    assert metrics["failure"] is True
+    assert metrics["is_null"] is False
+    assert metrics["outcome"] == "run"
     assert metrics["out_recorded"] is False
     assert metrics["runner_scored"] is True
+    assert math.isfinite(float(metrics["t_total"]))
+
+
+def test_run_episode_records_foul_ball_as_null_outcome() -> None:
+    cfg = EpisodeConfig(
+        n_robots=4,
+        max_time=2.0,
+        launch_time=0.0,
+        ball_p0=DEFAULT_FIELD.home_base,
+        ball_v0=(20.0, 0.0),
+        ball_decel=0.0,
+    )
+
+    metrics = run_episode(cfg, method="ours_direct")
+
+    assert metrics["success"] is False
+    assert metrics["failure"] is False
+    assert metrics["is_null"] is True
+    assert metrics["outcome"] == "foul"
+    assert metrics["out_recorded"] is False
+    assert metrics["runner_scored"] is False
+    assert metrics["dead_ball_reason"] == "foul"
+    assert math.isnan(float(metrics["t_intercept"]))
     assert math.isfinite(float(metrics["t_total"]))
 
 

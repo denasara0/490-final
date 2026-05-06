@@ -22,6 +22,7 @@ dev = [
 [project.scripts]
 infield-sim = "infield_defense.cli:main"
 infield-eval = "infield_defense.evaluate:main"
+infield-analyze = "infield_defense.analyze_eval:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
